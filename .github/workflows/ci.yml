@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, dev, qa]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for package.json
+        id: app
+        run: |
+          if [ -f package.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup pnpm
+        if: steps.app.outputs.exists == 'true'
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        if: steps.app.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        if: steps.app.outputs.exists == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        if: steps.app.outputs.exists == 'true'
+        run: pnpm lint
+
+      - name: Typecheck
+        if: steps.app.outputs.exists == 'true'
+        run: pnpm typecheck
+
+      - name: Unit tests
+        if: steps.app.outputs.exists == 'true'
+        run: pnpm test
+
+      - name: Build
+        if: steps.app.outputs.exists == 'true'
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ci-placeholder
+          NEXT_PUBLIC_SITE_URL: http://localhost:3000
+          SUPABASE_SECRET_KEY: ci-placeholder
+
+      - name: Phase 0 skip
+        if: steps.app.outputs.exists == 'false'
+        run: 'echo "Phase 0: package.json not found; skipping app checks."'
+
+  db:
+    name: db
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for Supabase config
+        id: supabase
+        run: |
+          if [ -f supabase/config.toml ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Supabase CLI
+        if: steps.supabase.outputs.exists == 'true'
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start Supabase
+        if: steps.supabase.outputs.exists == 'true'
+        run: supabase start
+
+      - name: Reset database and apply migrations
+        if: steps.supabase.outputs.exists == 'true'
+        run: supabase db reset
+
+      - name: Run RLS tests
+        if: steps.supabase.outputs.exists == 'true'
+        run: supabase test db
+
+      - name: Phase 0 skip
+        if: steps.supabase.outputs.exists == 'false'
+        run: 'echo "Phase 0: supabase/config.toml not found; skipping database checks."'
+
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
